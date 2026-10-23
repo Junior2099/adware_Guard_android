@@ -17,6 +17,38 @@ pub fn valid_package(s: &str) -> bool {
     // O framework Android usa o identificador especial sem ponto: android.
     s == "android" || s.contains('.') && s.split('.').all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
 }
+// General name heuristics are review hints, never confirmed-malware rules.
+fn normalized_name(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    s.nfkd().filter(|c| c.is_ascii_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+pub fn name_reason(package: &str, label: Option<&str>) -> String {
+    let package = normalized_name(package);
+    let label = label.map(normalized_name).unwrap_or_default();
+    // Normalize each field independently: never join the package and label.
+    let terms = [
+        ("adware", &["adware"][..]), ("popup", &["popup"][..]),
+        ("pushads", &["pushads"][..]), ("clicker", &["clicker"][..]),
+        ("clear", &["clear"][..]), ("clean", &["clean"][..]),
+        ("PDF / PDF viewer / visualizador PDF", &["pdf"][..]),
+        ("laucher / launcher", &["laucher", "launcher"][..]),
+        ("off-line / offline", &["offline"][..]), ("song", &["song"][..]),
+        ("baixar vídeos", &["baixarvideos"][..]), ("videosgratis", &["videosgratis"][..]),
+        ("lanterna / flashlight", &["lanterna", "flashlight"][..]),
+        ("leitor QR / QR scanner", &["qrscanner", "qrcodescanner", "leitorqr", "qrcode"][..]),
+        ("leitor de código de barras / barcode", &["codigodebarras", "barcode"][..]),
+    ];
+    let mut hits = Vec::new();
+    for (term, aliases) in terms {
+        let in_package = aliases.iter().any(|a| package.contains(*a));
+        let in_label = aliases.iter().any(|a| label.contains(*a));
+        if in_package || in_label {
+            hits.push(format!("{term} ({})", match (in_package,in_label) { (true,true) => "pacote e nome exibido", (true,false) => "pacote", _ => "nome exibido" }));
+        }
+    }
+    if hits.is_empty() { "Sem indício pelas regras disponíveis; não garante segurança.".into() }
+    else { format!("Nome contém termo(s) para revisão: {}. Sinal fraco; aplicativos legítimos também podem usar esses nomes. Não comprova adware.", hits.join(", ")) }
+}
 pub(crate) fn command(path: &PathBuf, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new(path);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -74,9 +106,7 @@ impl Adb {
         for name in third.union(&system) {
             let matched = rules.contains(name);
             let reason = if matched { "Correspondência exata na lista local; confirme a evidência e a origem.".into() }
-                else if ["adware", "popup", "pushads", "clicker"].iter().any(|s| name.to_lowercase().contains(s)) {
-                    "Nome contém termo de publicidade; sinal fraco, sujeito a falso positivo.".into()
-                } else { "Sem indício pelas regras disponíveis; não garante segurança.".into() };
+                else { name_reason(name, None) };
             all.push(Package { name: name.clone(), system: name == "android" || system.contains(name), reason, matched, removed: false });
         }
         all.sort_by_key(|p| (!p.matched, !p.reason.starts_with("Nome"), p.name.clone()));
@@ -156,6 +186,17 @@ mod tests {
         assert!(!valid_package("other"));
         assert!(!valid_package("android;reboot"));
         assert!(parse_packages("package:android\nError: denied").is_err());
+    }
+    #[test] fn requested_name_terms_accept_case_accents_and_separators() {
+        for name in ["clear", "clean", "PDF", "PDF viewer", "visualizador PDF", "laucher", "launcher", "off-line", "off line", "song", "baixar vídeos", "videosgratis", "Vídeos Grátis", "lanterna", "FlashLight", "QR scanner", "leitor de código de barras"] {
+            let reason = name_reason("com.example.utility", Some(name));
+            assert!(reason.starts_with("Nome"), "{name}: {reason}");
+            assert!(reason.contains("nome exibido"));
+            assert!(reason.contains("Não comprova adware"));
+        }
+        assert!(name_reason("com.example.pdfviewer", None).contains("pacote"));
+        assert!(!name_reason("com.example.reader", None).starts_with("Nome"));
+        assert!(!name_reason("com.example.off", Some("line")).starts_with("Nome"));
     }
     #[test] fn list_needs_evidence_and_exact_match() {
         assert!(parse_rules("com.test.app").is_err());

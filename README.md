@@ -192,3 +192,20 @@ O filtro **Todos os tipos / Terceiros / Sistema** funciona junto da busca e da c
 Para atualizar, substitua `Cargo.toml`, `Cargo.lock` e a pasta `src` no projeto antigo pelos desta versão, preserve `tools` e `data` e execute `compilar-windows.bat`. A confirmação individual por caixa de seleção e todas as verificações de remoção foram mantidas.
 
 Validação da versão 0.3.0: `cargo check --target x86_64-pc-windows-msvc` aprovado e `cargo test` aprovado (4 testes, incluindo separação das categorias sem ocultar alertas em apps do sistema). A execução visual no Windows e em um aparelho conectado continua dependendo da conferência no computador do usuário.
+
+## Versão 0.3.1 — termos de revisão ampliados
+
+A heurística por nome agora considera `clear`, `clean` (também alcança cleaner), `PDF`, `PDF viewer`, `visualizador PDF`, `laucher`, `launcher`, `off-line`, `offline`, `song`, `baixar vídeos`, `videosgratis`, `lanterna` e os termos anteriores `adware`, `popup`, `pushads` e `clicker`.
+
+Também foram incluídos `flashlight`, `QR scanner`, `QR code scanner`, `leitor QR`, `QR code`, `barcode` e `código de barras`. Há campanhas históricas documentadas usando apps de lanterna/limpeza e leitores de código de barras; isso não permite concluir que apps dessas categorias sejam geralmente maliciosos:
+
+- Check Point Research, LightsOut (2018): https://research.checkpoint.com/2018/malicious-flashlight-apps-google-play/
+- Trend Micro, leitores de código de barras e adware (2020): https://www.trendmicro.com/pt_br/about/newsroom/press-releases/2020/2020-07-07.html
+
+A comparação é por trecho do texto, sem diferenciar maiúsculas, acentos, espaços, pontuação ou hífens. É deliberadamente abrangente e pode gerar muitos falsos positivos, inclusive em apps legítimos conhecidos. O alerta apresenta os termos encontrados e indica **pacote**, **nome exibido** ou **pacote e nome exibido**. Não é um diagnóstico, não adiciona o aplicativo à lista de malware e não incrementa o contador de nocivos eliminados.
+
+A análise inicial usa o identificador do pacote fornecido pelo ADB. O nome comercial é analisado quando você clica em **Carregar nome e ícone** e o AAPT2 consegue obtê-lo; a categoria e os contadores são atualizados nesse momento. Ao reanalisar no mesmo usuário/dispositivo, os nomes já carregados na sessão são considerados novamente. Sem AAPT2, a análise por pacote continua funcionando, mas nomes comerciais desconhecidos não podem ser pesquisados. Nenhuma busca online ou conclusão sobre assinatura do APK é feita.
+
+Para atualizar, substitua `Cargo.toml`, `Cargo.lock` e a pasta `src`; preserve sua lista local e o ADB nas pastas `data` e `tools`. Depois execute `compilar-windows.bat`.
+
+Validação da versão 0.3.1: `cargo test` aprovado (5 testes) e `cargo check --target x86_64-pc-windows-msvc` aprovado. Os testes novos verificam termos solicitados, acentos, maiúsculas, separadores e origem do alerta. Sem nova execução gráfica ou em aparelho Android neste ambiente.

@@ -45,7 +45,7 @@ fn risk(p: &Package) -> usize {
 fn risk_description(category: usize) -> &'static str {
     match category {
         1 => "Correspondência na lista local. Revise a fonte e a identidade do APK; não é confirmação de infecção.",
-        2 => "Termo suspeito no nome do pacote. Sinal fraco, sujeito a falsos positivos.",
+        2 => "Termo para revisão no pacote ou nome exibido carregado. Sinal fraco, sujeito a falsos positivos.",
         3 => "Nenhum indício pelas regras disponíveis. Isso não significa que o app seja seguro.",
         4 => "Remoções verificadas nesta análise, para o usuário Android selecionado.",
         _ => "Categorias de análise separadas do tipo de app. Pacotes do sistema continuam protegidos.",
@@ -170,7 +170,12 @@ impl eframe::App for App {
                             self.removed = 0; self.matched_removed = 0;
                             self.message("Detecção concluída. Selecione um aparelho autorizado e analise.".into());
                         }
-                        Ok(Reply::Scan(user, packages)) => { self.user = user; self.packages = packages; self.scanned = true;
+                        Ok(Reply::Scan(user, mut packages)) => {
+                            if self.user != user { self.metadata.clear(); }
+                            for p in &mut packages {
+                                if !p.matched { p.reason = core::name_reason(&p.name, self.metadata.get(&p.name).map(|m|m.label.as_str())); }
+                            }
+                            self.user = user; self.packages = packages; self.scanned = true;
                             self.message(format!("Análise concluída: {} pacotes. {}", self.packages.len(), self.summary())); }
                         Ok(Reply::Removed(name, matched)) => {
                             if let Some(p) = self.packages.iter_mut().find(|p| p.name == name) { p.removed = true; }
@@ -180,7 +185,10 @@ impl eframe::App for App {
                         Ok(Reply::Metadata(name, info)) => {
                             let texture = info.pixels.map(|(w,h,pixels)| ctx.load_texture(
                                 format!("app-icon-{name}"), egui::ColorImage::from_rgba_unmultiplied([w,h], &pixels), egui::TextureOptions::LINEAR));
-                            let note = info.note.clone();
+                            if let Some(p) = self.packages.iter_mut().find(|p| p.name == name) {
+                                if !p.matched { p.reason = core::name_reason(&p.name, Some(&info.label)); }
+                            }
+                            let note = format!("{} Categoria por nome atualizada.", info.note);
                             self.metadata.insert(name, AppMetadata { label: info.label, texture, note: info.note });
                             self.message(note);
                         }
@@ -204,7 +212,7 @@ impl eframe::App for App {
                             apply_theme(ctx, self.dark); ctx.request_repaint();
                         }
                     });
-                    ui.label(RichText::new("v0.3.0").color(colors.muted));
+                    ui.label(RichText::new("v0.3.1").color(colors.muted));
                     ui.label(RichText::new(if self.selected.is_empty() { "Aguardando conexão" } else { "Dispositivo selecionado" }).color(if self.selected.is_empty() { colors.muted } else { colors.accent }));
                 });
             });
@@ -255,6 +263,7 @@ impl eframe::App for App {
                     }
                 });
                 ui.label(RichText::new(risk_description(self.category)).small().color(colors.muted));
+                ui.label(RichText::new("Nome exibido: analisado após Carregar nome e ícone (AAPT2). Sem isso, a verificação usa o identificador do pacote.").small().color(colors.muted));
                 ui.add_space(12.0);
                 if !self.scanned { panel(ui).show(ui, |ui| { ui.add_space(22.0); ui.heading(if busy { "Análise em andamento" } else { "Tudo pronto para começar" });
                     ui.label("Selecione um dispositivo na lateral e clique em Analisar aplicativos."); ui.add_space(22.0); }); }
