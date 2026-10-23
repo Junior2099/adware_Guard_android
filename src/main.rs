@@ -3,7 +3,7 @@ mod core;
 mod icons;
 use core::{Adb, Device, Package};
 use eframe::egui::{self, Color32, RichText, Vec2};
-use std::{collections::HashMap, path::PathBuf, sync::mpsc::{self, Receiver}, time::Duration};
+use std::{collections::{HashMap, BTreeSet}, path::PathBuf, sync::mpsc::{self, Receiver}, time::Duration};
 #[derive(Clone, Copy)]
 struct Palette { bg: Color32, card: Color32, sidebar: Color32, text: Color32, muted: Color32, accent: Color32, danger: Color32, warning: Color32, button: Color32, avatar: Color32 }
 fn palette(dark: bool) -> Palette {
@@ -51,22 +51,22 @@ fn risk_description(category: usize) -> &'static str {
         _ => "Categorias de análise separadas do tipo de app. Pacotes do sistema continuam protegidos.",
     }
 }
-enum Reply { Devices(Vec<Device>), Scan(String, Vec<Package>), Removed(String, bool), Message(String), Metadata(String, icons::Metadata) }
+enum Reply { Devices(Vec<Device>), Scan(String, Vec<Package>), Batch(Vec<(Package, core::Result<()>)>), Message(String), Metadata(String, icons::Metadata) }
 struct AppMetadata { label: String, texture: Option<egui::TextureHandle>, note: String }
 struct App {
     dark: bool, app_kind: usize, path: String, aapt: String, devices: Vec<Device>, selected: String, user: String,
     packages: Vec<Package>, filter: String, category: usize, status: String, log: Vec<String>,
-    receiver: Option<Receiver<core::Result<Reply>>>, pending: Option<Package>, confirmed: bool,
+    receiver: Option<Receiver<core::Result<Reply>>>, pending: Option<Vec<Package>>, selected_apps: BTreeSet<String>, confirmed: bool,
     dns_confirm: Option<bool>, scanned: bool, removed: usize, matched_removed: usize,
     metadata: HashMap<String, AppMetadata>,
 }
 impl Default for App {
     fn default() -> Self { Self {
-        dark: true, app_kind: 0, path: core::root().join("tools/platform-tools/adb.exe").display().to_string(),
+        dark: false, app_kind: 0, path: core::root().join("tools/platform-tools/adb.exe").display().to_string(),
         aapt: core::root().join("tools/aapt2/aapt2.exe").display().to_string(),
         devices: vec![], selected: String::new(), user: String::new(), packages: vec![], filter: String::new(), category: 0,
         status: "Conecte o celular por USB para começar.".into(), log: vec![], receiver: None,
-        pending: None, confirmed: false, dns_confirm: None, scanned: false, removed: 0, matched_removed: 0, metadata: HashMap::new(),
+        pending: None, selected_apps: BTreeSet::new(), confirmed: false, dns_confirm: None, scanned: false, removed: 0, matched_removed: 0, metadata: HashMap::new(),
     } }
 }
 fn panel(ui: &egui::Ui) -> egui::Frame { let colors = palette(ui.visuals().dark_mode); egui::Frame::new().fill(colors.card).corner_radius(12).inner_margin(16) }
@@ -112,6 +112,21 @@ impl App {
         format!("Apps da lista de nocivos eliminados: {} • Outros apps removidos: {} • Suspeitas por nome: {suspicious}\n{finding}",
             self.matched_removed, self.removed - self.matched_removed)
     }
+    fn apply_batch(&mut self, results: Vec<(Package, core::Result<()>)>) {
+        let total = results.len(); let mut success = 0;
+        for (snapshot, result) in results {
+            match result {
+                Ok(()) => {
+                    if let Some(p) = self.packages.iter_mut().find(|p| p.name == snapshot.name) { p.removed = true; }
+                    self.selected_apps.remove(&snapshot.name);
+                    self.removed += 1; if snapshot.matched { self.matched_removed += 1; } success += 1;
+                    self.log.push(format!("{}: remoção verificada para usuário {}.", snapshot.name, self.user));
+                }
+                Err(error) => self.log.push(format!("{}: não removido ou não verificado — {error}", snapshot.name)),
+            }
+        }
+        self.message(format!("Remoção concluída: {success}/{total} verificadas; {} falhas ou resultados não verificados. Confira o histórico. {}", total-success, self.summary()));
+    }
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let colors = palette(self.dark);
         ui.add_space(10.0);
@@ -129,11 +144,11 @@ impl App {
             .selected_text(if self.selected.is_empty() { "Selecione um aparelho" } else { &self.selected }).show_ui(ui, |ui| {
                 for d in self.devices.iter().filter(|d| d.state == "device") { ui.selectable_value(&mut self.selected, d.serial.clone(), &d.serial); }
             });
-        if before != self.selected { self.packages.clear(); self.metadata.clear(); self.scanned = false; self.removed = 0; self.matched_removed = 0; }
+        if before != self.selected { self.packages.clear(); self.selected_apps.clear(); self.metadata.clear(); self.scanned = false; self.removed = 0; self.matched_removed = 0; }
         ui.add_space(12.0);
         ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
             if button(ui, "2. Analisar aplicativos", true).clicked() {
-                let adb = self.adb(); self.scanned = false; self.packages.clear();
+                let adb = self.adb(); self.scanned = false; self.packages.clear(); self.selected_apps.clear();
                 self.start(move || adb.scan().map(|(u,p)| Reply::Scan(u,p)));
             }
         });
@@ -165,7 +180,7 @@ impl eframe::App for App {
                     match result {
                         Err(e) => self.message(format!("Erro: {e}")),
                         Ok(Reply::Devices(d)) => {
-                            self.metadata.clear(); self.devices = d; self.packages.clear(); self.scanned = false;
+                            self.metadata.clear(); self.devices = d; self.packages.clear(); self.selected_apps.clear(); self.scanned = false;
                             self.selected = self.devices.iter().find(|d| d.state == "device").map(|d| d.serial.clone()).unwrap_or_default();
                             self.removed = 0; self.matched_removed = 0;
                             self.message("Detecção concluída. Selecione um aparelho autorizado e analise.".into());
@@ -177,11 +192,7 @@ impl eframe::App for App {
                             }
                             self.user = user; self.packages = packages; self.scanned = true;
                             self.message(format!("Análise concluída: {} pacotes. {}", self.packages.len(), self.summary())); }
-                        Ok(Reply::Removed(name, matched)) => {
-                            if let Some(p) = self.packages.iter_mut().find(|p| p.name == name) { p.removed = true; }
-                            self.removed += 1; if matched { self.matched_removed += 1; }
-                            self.message(format!("{name}: remoção verificada para o usuário {}. {}", self.user, self.summary()));
-                        }
+                        Ok(Reply::Batch(results)) => self.apply_batch(results),
                         Ok(Reply::Metadata(name, info)) => {
                             let texture = info.pixels.map(|(w,h,pixels)| ctx.load_texture(
                                 format!("app-icon-{name}"), egui::ColorImage::from_rgba_unmultiplied([w,h], &pixels), egui::TextureOptions::LINEAR));
@@ -212,7 +223,7 @@ impl eframe::App for App {
                             apply_theme(ctx, self.dark); ctx.request_repaint();
                         }
                     });
-                    ui.label(RichText::new("v0.3.1").color(colors.muted));
+                    ui.label(RichText::new("v0.4.0").color(colors.muted));
                     ui.label(RichText::new(if self.selected.is_empty() { "Aguardando conexão" } else { "Dispositivo selecionado" }).color(if self.selected.is_empty() { colors.muted } else { colors.accent }));
                 });
             });
@@ -268,6 +279,15 @@ impl eframe::App for App {
                 if !self.scanned { panel(ui).show(ui, |ui| { ui.add_space(22.0); ui.heading(if busy { "Análise em andamento" } else { "Tudo pronto para começar" });
                     ui.label("Selecione um dispositivo na lateral e clique em Analisar aplicativos."); ui.add_space(22.0); }); }
                 else {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(format!("{} aplicativo(s) selecionado(s)", self.selected_apps.len()));
+                        if ui.add_enabled(!self.selected_apps.is_empty(), egui::Button::new("Revisar e remover selecionados")).clicked() {
+                            let apps: Vec<_> = self.packages.iter().filter(|p| self.selected_apps.contains(&p.name) && !p.system && !p.removed).cloned().collect();
+                            if !apps.is_empty() { self.pending = Some(apps); self.confirmed = false; }
+                        }
+                        if ui.button("Limpar seleção").clicked() { self.selected_apps.clear(); }
+                    });
+                    ui.label(RichText::new("A seleção é mantida ao mudar os filtros; a confirmação mostra a lista completa. Selecionar não comprova que um app seja malicioso.").small().color(colors.muted));
                     let needle = self.filter.to_lowercase();
                     let mut request_remove = None; let mut request_icon = None;
                     let mut matches: Vec<_> = self.packages.iter().filter(|p| {
@@ -291,6 +311,12 @@ impl eframe::App for App {
                             panel(ui).show(ui, |ui| {
                                 ui.set_min_width((ui.available_width()-2.0).max(0.0));
                                 ui.horizontal(|ui| {
+                                    let mut checked = self.selected_apps.contains(&p.name);
+                                    let selection = ui.add_enabled(!p.system && !p.removed, egui::Checkbox::without_text(&mut checked));
+                                    if selection.changed() {
+                                        if checked { self.selected_apps.insert(p.name.clone()); } else { self.selected_apps.remove(&p.name); }
+                                    }
+                                    selection.on_hover_text(if p.system { "Apps do sistema são protegidos" } else if p.removed { "App já removido" } else { "Selecionar para revisão de remoção" });
                                     avatar(ui, &p.name, meta.and_then(|m|m.texture.as_ref()), 44.0);
                                     ui.add_space(8.0);
                                     ui.vertical(|ui| {
@@ -318,7 +344,7 @@ impl eframe::App for App {
                             ui.add_space(8.0);
                         }
                     });
-                    if let Some(p) = request_remove { self.pending = Some(p); self.confirmed = false; }
+                    if let Some(p) = request_remove { self.pending = Some(vec![p]); self.confirmed = false; }
                     if let Some(name) = request_icon { let adb = self.adb(); let aapt = PathBuf::from(self.aapt.trim()); let user = self.user.clone();
                         self.start(move || icons::load(&adb, aapt, user, name.clone()).map(|m|Reply::Metadata(name,m))); }
                 }
@@ -330,28 +356,48 @@ impl eframe::App for App {
                 let rect = ctx.screen_rect(); ui.allocate_rect(rect, egui::Sense::click()); ui.painter().rect_filled(rect, 0, Color32::from_black_alpha(155));
             });
         }
-        if let Some(p) = self.pending.clone() {
-            egui::Window::new("Confirmar remoção").id(egui::Id::new("remove-confirm")).order(egui::Order::Foreground)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).collapsible(false).resizable(false).default_width(480.0).show(ctx, |ui| {
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| { avatar(ui, &p.name, self.metadata.get(&p.name).and_then(|m|m.texture.as_ref()), 48.0);
-                        ui.vertical(|ui| { ui.strong(self.metadata.get(&p.name).map(|m|m.label.as_str()).unwrap_or(&p.name)); ui.label(RichText::new(&p.name).small().color(colors.muted)); }); });
-                    ui.add_space(14.0); ui.label(format!("Dispositivo: {} · Usuário Android: {}", self.selected, self.user));
-                    ui.label(&p.reason); ui.add_space(12.0);
-                    panel(ui).show(ui, |ui| { ui.colored_label(colors.danger, "A remoção pode apagar os dados deste aplicativo.");
-                        ui.label("Faça backup e confirme a origem. Outros perfis do Android podem manter o app instalado."); });
-                    ui.add_space(14.0);
-                    ui.checkbox(&mut self.confirmed, "Entendo e desejo remover este aplicativo.");
-                    ui.add_space(14.0);
+        if let Some(apps) = self.pending.clone() {
+            egui::Window::new("Confirmar remoção dos aplicativos").id(egui::Id::new("remove-confirm")).order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).collapsible(false).resizable(false).default_width(560.0).show(ctx, |ui| {
+                    ui.add_space(8.0); ui.heading(format!("Deseja remover {} aplicativo(s)?", apps.len()));
+                    ui.label(format!("Dispositivo: {} · Usuário Android: {}", self.selected, self.user));
+                    ui.add_space(10.0);
+                    egui::ScrollArea::vertical().id_salt("batch-review").max_height(240.0).show(ui, |ui| {
+                        for p in &apps {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    avatar(ui, &p.name, self.metadata.get(&p.name).and_then(|m|m.texture.as_ref()), 32.0);
+                                    ui.vertical(|ui| {
+                                        ui.strong(self.metadata.get(&p.name).map(|m|m.label.as_str()).unwrap_or(&p.name));
+                                        ui.label(RichText::new(&p.name).small().color(colors.muted));
+                                    });
+                                });
+                                ui.label(RichText::new(&p.reason).small());
+                            });
+                        }
+                    });
+                    ui.add_space(10.0);
+                    panel(ui).show(ui, |ui| { ui.colored_label(colors.danger, "A remoção pode apagar os dados desses aplicativos.");
+                        ui.label("Faça backup e confirme a origem. Alertas por nome não comprovam infecção. Outros perfis podem manter os apps instalados."); });
+                    ui.add_space(12.0);
+                    ui.checkbox(&mut self.confirmed, "Entendo e desejo remover todos os aplicativos desta lista.");
+                    ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if button(ui, "Cancelar", false).clicked() { self.pending = None; self.confirmed = false; }
-                        ui.add_enabled_ui(self.confirmed && !busy, |ui| {
+                        ui.add_enabled_ui(self.confirmed && !busy && !apps.is_empty(), |ui| {
                             if ui.add(egui::Button::new(RichText::new("Confirmar e remover").strong().color(if self.dark { colors.bg } else { Color32::WHITE })).fill(colors.danger).min_size(Vec2::new(180.0,38.0)).corner_radius(8)).clicked() {
-                                let adb = self.adb(); let user = self.user.clone(); self.pending = None; self.confirmed = false;
-                                self.start(move || { adb.remove(&user, &p.name)?; Ok(Reply::Removed(p.name, p.matched)) });
+                                let adb = self.adb(); let user = self.user.clone(); let count = apps.len(); self.pending = None; self.confirmed = false;
+                                self.start(move || {
+                                    let results = apps.into_iter().map(|p| {
+                                        let result = if p.system || p.removed { Err("App protegido ou já removido".into()) } else { adb.remove(&user, &p.name) };
+                                        (p, result)
+                                    }).collect();
+                                    Ok(Reply::Batch(results))
+                                });
+                                self.status = format!("Removendo {count} aplicativo(s), um por vez. Aguarde o resumo final.");
                             }
                         });
-                    }); ui.add_space(6.0);
+                    });
                 });
         }
         if let Some(auto) = self.dns_confirm {
@@ -381,7 +427,7 @@ fn window_icon() -> egui::IconData {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1220.0, 860.0]).with_min_inner_size([1080.0, 720.0]).with_icon(window_icon()), ..Default::default() };
     eframe::run_native("AdwareGuard", options, Box::new(|cc| {
-        apply_theme(&cc.egui_ctx, true);
+        apply_theme(&cc.egui_ctx, false);
         Ok(Box::new(App::default()))
     }))
 }
@@ -390,6 +436,20 @@ fn main() -> eframe::Result<()> {
 mod presentation_tests {
     use super::*;
     fn package() -> Package { Package { name: "com.test.app".into(), system: true, reason: "Nome contém termo".into(), matched: false, removed: false } }
+    #[test]
+    fn partial_batch_counts_only_verified_successes_and_keeps_failures_selected() {
+        let mut first = package(); first.system = false; first.matched = true;
+        let mut second = first.clone(); second.name = "com.test.second".into(); second.matched = false;
+        let mut app = App::default();
+        assert!(!app.dark);
+        app.scanned = true; app.packages = vec![first.clone(), second.clone()];
+        app.selected_apps = [first.name.clone(), second.name.clone()].into_iter().collect();
+        app.apply_batch(vec![(first.clone(), Ok(())), (second.clone(), Err("ADB recusou".into()))]);
+        assert_eq!(app.removed, 1); assert_eq!(app.matched_removed, 1);
+        assert!(app.packages[0].removed); assert!(!app.packages[1].removed);
+        assert!(!app.selected_apps.contains(&first.name)); assert!(app.selected_apps.contains(&second.name));
+        assert!(app.log.iter().any(|line| line.contains("ADB recusou")));
+    }
     #[test]
     fn risk_groups_do_not_overlap_or_hide_system_alerts() {
         let mut p = package();

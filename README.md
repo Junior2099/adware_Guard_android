@@ -76,7 +76,7 @@ O caminho padrão usa a pasta do executável quando ela contém `tools/platform-
 6. ADB precisa retornar `Success` e o pacote deve deixar de aparecer na listagem do usuário analisado para que o contador aumente. Falhas ou verificações incompletas não são contadas. Em caso de timeout, a operação pode já ter ocorrido: atualize a análise antes de repetir.
 7. Clique em **Finalizar e mostrar resumo** para ver o resultado; ele também fica sempre visível após análise e remoções.
 
-A remoção usa `pm uninstall --user ID PACOTE`, para o usuário analisado. Outros usuários/perfis podem continuar com o app. Uma troca de usuário Android é detectada antes da remoção e exige nova análise. Não há root, remoção em massa ou desinstalação automática.
+A remoção usa `pm uninstall --user ID PACOTE`, para o usuário analisado. Outros usuários/perfis podem continuar com o app. Uma troca de usuário Android é detectada antes da remoção e exige nova análise. Não há root ou desinstalação automática. A remoção em lote exige seleção manual e confirmação explícita da lista.
 
 ### Classificação e resumo
 
@@ -178,7 +178,7 @@ Feche o app. No projeto antigo, substitua **Cargo.toml** e a pasta **src** pelos
 
 ## Versão 0.3.0 — temas e categorias de análise
 
-O interruptor no cabeçalho alterna entre **Tema claro** e **Tema escuro**, incluindo painéis, lista, textos, campos, botões e diálogos de confirmação. A mudança não interrompe a análise nem altera o aparelho selecionado; a preferência vale para a sessão atual e o app inicia no tema escuro.
+O interruptor no cabeçalho alterna entre **Tema claro** e **Tema escuro**, incluindo painéis, lista, textos, campos, botões e diálogos de confirmação. A mudança não interrompe a análise nem altera o aparelho selecionado; a preferência vale para a sessão atual e o app inicia no tema claro.
 
 A lista agora tem filtros com contadores e seções separadas:
 
@@ -209,3 +209,22 @@ A análise inicial usa o identificador do pacote fornecido pelo ADB. O nome come
 Para atualizar, substitua `Cargo.toml`, `Cargo.lock` e a pasta `src`; preserve sua lista local e o ADB nas pastas `data` e `tools`. Depois execute `compilar-windows.bat`.
 
 Validação da versão 0.3.1: `cargo test` aprovado (5 testes) e `cargo check --target x86_64-pc-windows-msvc` aprovado. Os testes novos verificam termos solicitados, acentos, maiúsculas, separadores e origem do alerta. Sem nova execução gráfica ou em aparelho Android neste ambiente.
+
+## Versão 0.4.0 — tema claro e seleção múltipla
+
+O programa agora inicia no **tema claro**. O interruptor do cabeçalho continua permitindo alternar para o tema escuro durante a sessão.
+
+Para revisar vários aplicativos:
+
+1. Analise o aparelho e marque as caixas dos apps que deseja revisar. Apps do sistema e apps já removidos não podem ser selecionados.
+2. Use os filtros e a busca conforme necessário. As seleções continuam marcadas mesmo quando ficam ocultas por um filtro; o total sempre é exibido na barra acima da lista. **Limpar seleção** desmarca todos.
+3. Clique em **Revisar e remover selecionados**. O diálogo apresenta a lista completa, incluindo os apps que estavam ocultos por filtros, seus nomes/pacotes, motivos dos alertas, dispositivo e usuário Android.
+4. Confira a lista e marque **Entendo e desejo remover todos os aplicativos desta lista**. Só então o botão **Confirmar e remover** fica disponível. Cancelar não remove nada e mantém a seleção para ajustes; a caixa de confirmação sempre começa desmarcada ao reabrir.
+5. As remoções são executadas uma por vez, com as mesmas verificações de usuário, proteção do sistema, instalação e resultado da versão anterior. A interface aguarda o término do lote e impede outras ações ADB concorrentes.
+6. Ao concluir, o resumo informa quantas remoções foram verificadas e quantas falharam ou não puderam ser verificadas. O histórico registra o resultado de cada pacote. Somente sucessos verificados aumentam os contadores; os apps com falha permanecem selecionados para revisão. Se houver timeout, reanalise antes de tentar novamente, pois uma ação pode já ter ocorrido.
+
+O botão individual **Revisar remoção** continua disponível e usa a mesma confirmação com uma lista de um aplicativo. Detectar novamente, trocar o dispositivo ou iniciar outra análise limpa a seleção. A seleção manual não classifica o app como malware, não altera as regras e não incrementa o contador de nocivos por si só. A desinstalação pode apagar os dados dos aplicativos e vale para o usuário Android analisado; faça backup antes.
+
+Atualização: substitua `Cargo.toml`, `Cargo.lock` e `src`, preserve `tools` e `data` e execute `compilar-windows.bat`.
+
+Validação 0.4.0: `cargo test` aprovado (6 testes), incluindo resultado parcial de lote, contagem somente de remoções verificadas, manutenção da seleção em falhas e tema claro padrão. `cargo check --target x86_64-pc-windows-msvc` aprovado. A execução visual no Windows e com Android conectado não foi realizada neste ambiente.
