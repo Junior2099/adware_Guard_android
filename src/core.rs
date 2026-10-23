@@ -123,6 +123,9 @@ impl Adb {
         if self.packages(user, false)?.contains(package) { return Err("ADB retornou sucesso, mas o pacote ainda aparece instalado.".into()); }
         Ok(())
     }
+    pub fn animations(&self, disabled: bool) -> Result<String> {
+        configure_animations(|args| self.run(args), disabled)
+    }
     pub fn dns(&self, automatic: bool) -> Result<String> {
         let old_mode = self.run(&["shell", "settings", "get", "global", "private_dns_mode"])?;
         let old_host = self.run(&["shell", "settings", "get", "global", "private_dns_specifier"])?;
@@ -150,6 +153,44 @@ impl Adb {
         change
     }
 }
+const ANIMATION_KEYS: [&str; 3] = ["window_animation_scale", "transition_animation_scale", "animator_duration_scale"];
+fn animation_value(raw: &str) -> Option<f32> {
+    if raw.is_empty() || !raw.bytes().all(|b| b"0123456789.eE+-".contains(&b)) { return None; }
+    raw.parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0)
+}
+fn configure_animations(mut run: impl FnMut(&[&str]) -> Result<String>, disabled: bool) -> Result<String> {
+    let mut previous = Vec::new();
+    // Read and validate every original value before making any change.
+    for key in ANIMATION_KEYS {
+        let raw = run(&["shell", "settings", "get", "global", key])?;
+        if raw != "null" && animation_value(&raw).is_none() { return Err(format!("Valor anterior inesperado para {key}: {raw}. Nenhuma animação foi alterada.")); }
+        previous.push((key,raw));
+    }
+    let value = if disabled { "0" } else { "1" };
+    let expected = if disabled { 0.0 } else { 1.0 };
+    let changed = (|| -> Result<()> {
+        for key in ANIMATION_KEYS {
+            run(&["shell", "settings", "put", "global", key, value])?;
+            let actual = run(&["shell", "settings", "get", "global", key])?;
+            if animation_value(&actual) != Some(expected) { return Err(format!("Android não confirmou {key}={value} (retornou {actual}).")); }
+        }
+        Ok(())
+    })();
+    if let Err(error) = changed {
+        let mut failures = Vec::new();
+        for (key,raw) in previous {
+            let restored = if raw == "null" { run(&["shell", "settings", "delete", "global", key]) }
+                else { run(&["shell", "settings", "put", "global", key, &raw]) };
+            let checked = restored.and_then(|_| run(&["shell", "settings", "get", "global", key]));
+            let verified = match checked { Ok(actual) => if raw == "null" { actual == "null" } else { animation_value(&actual) == animation_value(&raw) }, Err(_) => false };
+            if !verified { failures.push(key); }
+        }
+        return Err(format!("Animações: {error} {}", if failures.is_empty() { "Valores anteriores restaurados e verificados.".to_string() }
+            else { format!("Não foi possível confirmar a restauração de: {}. Confira as escalas em Opções do desenvolvedor no celular.", failures.join(", ")) }));
+    }
+    Ok(if disabled { "Animações do Android desativadas: as três escalas foram gravadas e verificadas em 0×. Alguns apps podem usar animações próprias." }
+       else { "Animações do Android no padrão 1×: as três escalas foram gravadas e verificadas. Este botão aplica 1×, não restaura personalizações anteriores." }.into())
+}
 pub fn parse_packages(s: &str) -> Result<BTreeSet<String>> {
     let mut set = BTreeSet::new();
     for line in s.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -173,6 +214,41 @@ pub fn parse_rules(s: &str) -> Result<BTreeSet<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn animation_settings_verify_and_restore_partial_failure() {
+        use std::collections::BTreeMap;
+        let original: BTreeMap<String,String> = ANIMATION_KEYS.into_iter().enumerate().map(|(i,k)| (k.into(), if i == 2 { "null".into() } else { "0.5".into() })).collect();
+        let mut state = original.clone(); let mut refused = false;
+        let result = configure_animations(|args| {
+            let key = args[4];
+            match args[2] {
+                "get" => Ok(state.get(key).cloned().unwrap_or("null".into())),
+                "put" => {
+                    if key == ANIMATION_KEYS[1] && args[5] == "0" && !refused { refused = true; return Err("Permission denied".into()); }
+                    state.insert(key.into(), args[5].into()); Ok(String::new())
+                }
+                "delete" => { state.insert(key.into(), "null".into()); Ok(String::new()) }
+                _ => unreachable!(),
+            }
+        }, true);
+        assert!(result.unwrap_err().contains("restaurados e verificados")); assert_eq!(state, original);
+        for disabled in [true,false] {
+            configure_animations(|args| match args[2] {
+                "get" => Ok(state[args[4]].clone()),
+                "put" => { state.insert(args[4].into(), format!("{}.0",args[5])); Ok(String::new()) },
+                _ => unreachable!(),
+            }, disabled).unwrap();
+            for value in state.values() { assert_eq!(animation_value(value), Some(if disabled {0.0} else {1.0})); }
+        }
+        assert!(animation_value("NaN").is_none()); assert!(animation_value("0;reboot").is_none());
+    }
+    #[test] fn ignored_animation_write_is_not_reported_as_success() {
+        let result = configure_animations(|args| {
+            if args[2] == "get" { Ok("0.5".into()) } else { Ok(String::new()) }
+        }, true);
+        let error = result.unwrap_err();
+        assert!(error.contains("não confirmou"));
+        assert!(error.contains("restaurados e verificados"));
+    }
     #[test] fn packages_reject_shell_and_errors() {
         assert!(!valid_package("com.app;reboot")); assert!(!valid_package("com..app"));
         assert!(parse_packages("Error: denied").is_err());

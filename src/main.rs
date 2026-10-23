@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod core;
 mod icons;
+mod maintenance;
+mod device_cleanup;
 use core::{Adb, Device, Package};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use std::{collections::{HashMap, BTreeSet}, path::PathBuf, sync::mpsc::{self, Receiver}, time::Duration};
@@ -51,13 +53,13 @@ fn risk_description(category: usize) -> &'static str {
         _ => "Categorias de análise separadas do tipo de app. Pacotes do sistema continuam protegidos.",
     }
 }
-enum Reply { Devices(Vec<Device>), Scan(String, Vec<Package>), Batch(Vec<(Package, core::Result<()>)>), Message(String), Metadata(String, icons::Metadata) }
+enum Reply { Devices(Vec<Device>), Scan(String, Vec<Package>), Batch(Vec<(Package, core::Result<()>)>), Message(String), Browser(maintenance::BrowserTarget), Cleanup(device_cleanup::CleanupPlan), Metadata(String, icons::Metadata) }
 struct AppMetadata { label: String, texture: Option<egui::TextureHandle>, note: String }
 struct App {
     dark: bool, app_kind: usize, path: String, aapt: String, devices: Vec<Device>, selected: String, user: String,
     packages: Vec<Package>, filter: String, category: usize, status: String, log: Vec<String>,
     receiver: Option<Receiver<core::Result<Reply>>>, pending: Option<Vec<Package>>, selected_apps: BTreeSet<String>, confirmed: bool,
-    dns_confirm: Option<bool>, scanned: bool, removed: usize, matched_removed: usize,
+    dns_confirm: Option<bool>, animations_confirm: Option<bool>, browser_confirm: Option<maintenance::BrowserTarget>, cleanup_confirm: Option<device_cleanup::CleanupPlan>, cleanup_checked: bool, scanned: bool, removed: usize, matched_removed: usize,
     metadata: HashMap<String, AppMetadata>,
 }
 impl Default for App {
@@ -66,7 +68,7 @@ impl Default for App {
         aapt: core::root().join("tools/aapt2/aapt2.exe").display().to_string(),
         devices: vec![], selected: String::new(), user: String::new(), packages: vec![], filter: String::new(), category: 0,
         status: "Conecte o celular por USB para começar.".into(), log: vec![], receiver: None,
-        pending: None, selected_apps: BTreeSet::new(), confirmed: false, dns_confirm: None, scanned: false, removed: 0, matched_removed: 0, metadata: HashMap::new(),
+        pending: None, selected_apps: BTreeSet::new(), confirmed: false, dns_confirm: None, animations_confirm: None, browser_confirm: None, cleanup_confirm: None, cleanup_checked: false, scanned: false, removed: 0, matched_removed: 0, metadata: HashMap::new(),
     } }
 }
 fn panel(ui: &egui::Ui) -> egui::Frame { let colors = palette(ui.visuals().dark_mode); egui::Frame::new().fill(colors.card).corner_radius(12).inner_margin(16) }
@@ -163,6 +165,50 @@ impl App {
         });
         ui.add_space(8.0); ui.label(RichText::new("Android 9+. O DNS não remove apps nem bloqueia todos os anúncios.").small().color(colors.muted));
         ui.add_space(20.0);
+        ui.separator(); ui.add_space(10.0);
+        ui.label(RichText::new("ANIMAÇÕES DO ANDROID").color(colors.accent).size(12.0).strong());
+        ui.label(RichText::new("Reduza os efeitos de movimento do celular.").small().color(colors.muted));
+        ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
+            if button(ui, "Ativar redução de animações", false).clicked() { self.animations_confirm = Some(true); }
+            if ui.button("Conferir em Acessibilidade").clicked() { let adb = self.adb(); self.start(move || adb.open_accessibility().map(Reply::Message)); }
+            if ui.button("Animações padrão (1×)").clicked() { self.animations_confirm = Some(false); }
+        });
+        ui.add_space(18.0);
+        ui.separator(); ui.add_space(10.0);
+        ui.label(RichText::new("NAVEGADOR").color(colors.accent).size(12.0).strong());
+        ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
+            if button(ui, "Cache do navegador padrão", false).clicked() { let adb = self.adb(); self.start(move || adb.browser_target().map(Reply::Browser)); }
+        });
+        ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (label,package) in maintenance::SUPPORTED_BROWSERS {
+                    if ui.button(label).on_hover_text(format!("Revisar limpeza somente do cache: {package}")).clicked() {
+                        let adb = self.adb(); self.start(move || adb.browser_named(package).map(Reply::Browser));
+                    }
+                }
+            });
+        });
+        ui.label(RichText::new("Somente cache de Chrome, Brave ou Firefox estáveis, com confirmação. Outros aplicativos e pastas não são limpos.").small().color(colors.muted));
+        ui.add_space(16.0);
+        ui.label(RichText::new("FILES DO GOOGLE").color(colors.accent).size(12.0).strong());
+        ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
+            if button(ui, "Instalar Files pela Play Store", false).clicked() { let adb = self.adb(); self.start(move || adb.install_files_page().map(Reply::Message)); }
+        });
+        ui.label(RichText::new("Abre a página oficial no celular. Você confirma a instalação. Nenhuma limpeza é iniciada pelo AdwareGuard.").small().color(colors.muted));
+        ui.add_space(18.0);
+        ui.separator(); ui.add_space(10.0);
+        ui.label(RichText::new("LIMPEZA DO APARELHO").color(colors.accent).size(12.0).strong());
+        ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
+            if button(ui, "Limpar cache do aparelho", false).clicked() { let adb = self.adb(); self.start(move || adb.device_cache_plan().map(Reply::Cleanup)); }
+        });
+        ui.label(RichText::new("Prévia de miniaturas regeneráveis em DCIM/Pictures. Não limpa cache geral dos apps nem pastas pessoais.").small().color(colors.muted));
+        ui.add_space(14.0);
+        ui.label(RichText::new("GOOGLE PLAY PROTECT").color(colors.accent).size(12.0).strong());
+        ui.add_enabled_ui(!self.selected.is_empty(), |ui| {
+            if button(ui, "Verificar com Play Protect", false).clicked() { let adb = self.adb(); self.start(move || adb.open_play_protect().map(Reply::Message)); }
+        });
+        ui.label(RichText::new("Abre a Play Store. No celular: perfil → Play Protect → Verificar. O resultado aparece no aparelho.").small().color(colors.muted));
+        ui.add_space(18.0);
         egui::CollapsingHeader::new("Caminhos avançados").show(ui, |ui| {
             ui.label("ADB executável"); ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(220.0));
             ui.label("AAPT2 · opcional para ícones"); ui.add(egui::TextEdit::singleline(&mut self.aapt).desired_width(220.0));
@@ -203,6 +249,8 @@ impl eframe::App for App {
                             self.metadata.insert(name, AppMetadata { label: info.label, texture, note: info.note });
                             self.message(note);
                         }
+                        Ok(Reply::Browser(target)) => { self.browser_confirm = Some(target); self.message("Navegador identificado. Revise a confirmação.".into()); }
+                        Ok(Reply::Cleanup(plan)) => { self.cleanup_confirm = Some(plan); self.cleanup_checked = false; self.message("Prévia de limpeza pronta. Revise os arquivos antes de confirmar.".into()); }
                         Ok(Reply::Message(m)) => self.message(m),
                     }
                 }
@@ -212,7 +260,7 @@ impl eframe::App for App {
         }
         let busy = self.receiver.is_some();
         if busy { ctx.request_repaint_after(Duration::from_millis(100)); }
-        let modal = self.pending.is_some() || self.dns_confirm.is_some();
+        let modal = self.pending.is_some() || self.dns_confirm.is_some() || self.animations_confirm.is_some() || self.browser_confirm.is_some() || self.cleanup_confirm.is_some();
         egui::TopBottomPanel::top("header").frame(egui::Frame::new().fill(colors.card).inner_margin(18)).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 avatar(ui, "Guard", None, 40.0);
@@ -223,7 +271,7 @@ impl eframe::App for App {
                             apply_theme(ctx, self.dark); ctx.request_repaint();
                         }
                     });
-                    ui.label(RichText::new("v0.4.0").color(colors.muted));
+                    ui.label(RichText::new("v0.7.0").color(colors.muted));
                     ui.label(RichText::new(if self.selected.is_empty() { "Aguardando conexão" } else { "Dispositivo selecionado" }).color(if self.selected.is_empty() { colors.muted } else { colors.accent }));
                 });
             });
@@ -395,6 +443,70 @@ impl eframe::App for App {
                                     Ok(Reply::Batch(results))
                                 });
                                 self.status = format!("Removendo {count} aplicativo(s), um por vez. Aguarde o resumo final.");
+                            }
+                        });
+                    });
+                });
+        }
+        if let Some(disabled) = self.animations_confirm {
+            egui::Window::new("Confirmar ajuste de animações").order(egui::Order::Foreground).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .collapsible(false).resizable(false).default_width(470.0).show(ctx, |ui| {
+                    ui.heading(if disabled { "Ativar redução/remoção de animações?" } else { "Usar animações padrão (1×)?" });
+                    ui.label(format!("Aparelho: {}", self.selected));
+                    ui.label("Serão ajustadas as três escalas de animação e, quando expostos, os ajustes extras de redução/remoção do fabricante. No Android padrão, as três escalas também controlam a opção de acessibilidade.");
+                    ui.label(if disabled { "Alguns aplicativos podem manter efeitos próprios. Se o fabricante bloquear o comando, ajuste as três escalas manualmente em Opções do desenvolvedor." }
+                        else { "Aplica 1× nas três escalas e desliga os ajustes extras expostos; não recupera personalizações anteriores." });
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if button(ui, "Cancelar", false).clicked() { self.animations_confirm = None; }
+                        if button(ui, "Confirmar ajuste", true).clicked() {
+                            let adb = self.adb(); self.animations_confirm = None;
+                            self.start(move || adb.accessibility_motion(disabled).map(Reply::Message));
+                        }
+                    });
+                });
+        }
+        if let Some(target) = self.browser_confirm.clone() {
+            egui::Window::new("Cache do navegador").order(egui::Order::Foreground).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .collapsible(false).resizable(false).default_width(500.0).show(ctx, |ui| {
+                    ui.heading(if target.cache_only_supported { "Limpar somente o cache?" } else { "Limpeza manual no celular" });
+                    ui.label(format!("Aparelho: {} · Usuário: {}",self.selected,target.user));
+                    ui.strong(&target.package);
+                    if target.explicit_choice { ui.label("Navegador escolhido por você; não precisa ser o padrão."); }
+                    else if !target.default_confirmed { ui.colored_label(colors.warning,"Padrão não identificado. Chrome foi encontrado como alternativa; confirme se é o navegador que deseja limpar."); }
+                    if target.cache_only_supported {
+                        ui.label("O aparelho anuncia suporte à limpeza somente de cache. O programa não solicita exclusão de cookies, histórico, senhas ou outros dados. O cache pode ser recriado durante o uso.");
+                    } else {
+                        ui.label("Este aparelho não confirmou suporte seguro a limpar apenas cache por ADB. Vamos abrir os detalhes do navegador; toque em Armazenamento → Limpar cache. Não escolha Limpar dados/armazenamento.");
+                    }
+                    ui.add_space(12.0); ui.horizontal(|ui| {
+                        if button(ui,"Cancelar",false).clicked() { self.browser_confirm = None; }
+                        if button(ui,if target.cache_only_supported { "Confirmar limpeza de cache" } else { "Abrir detalhes no celular" },true).clicked() {
+                            let adb = self.adb(); self.browser_confirm = None;
+                            self.start(move || if target.cache_only_supported { adb.clear_browser_cache(&target).map(Reply::Message) } else { adb.open_browser_storage(&target).map(Reply::Message) });
+                        }
+                    });
+                });
+        }
+        if let Some(plan) = self.cleanup_confirm.clone() {
+            egui::Window::new("Revisar limpeza do aparelho").order(egui::Order::Foreground).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .collapsible(false).resizable(false).default_width(600.0).show(ctx, |ui| {
+                    ui.heading(format!("{} miniatura(s) elegível(is)",plan.paths.len()));
+                    ui.label(format!("Aparelho: {} · Usuário: {}",self.selected,plan.user));
+                    ui.label("Somente arquivos diretos das pastas .thumbnails de DCIM/Pictures. Fotos originais fora dessas pastas, Downloads, WhatsApp e caches de apps ficam fora da limpeza. A galeria pode recriar essas miniaturas.");
+                    egui::ScrollArea::vertical().id_salt("cleanup-preview").max_height(230.0).show(ui, |ui| {
+                        for path in &plan.paths { ui.label(RichText::new(path).small()); }
+                        for note in &plan.notes { ui.colored_label(colors.warning,note); }
+                    });
+                    if plan.paths.is_empty() { ui.label("Nenhuma miniatura elegível encontrada ou acessível. Isso não significa que o aparelho não tenha cache."); }
+                    ui.add_space(10.0);
+                    ui.checkbox(&mut self.cleanup_checked,"Revisei a lista e desejo apagar somente esses arquivos de miniaturas.");
+                    ui.horizontal(|ui| {
+                        if button(ui,"Cancelar",false).clicked() { self.cleanup_confirm = None; self.cleanup_checked = false; }
+                        ui.add_enabled_ui(self.cleanup_checked && !plan.paths.is_empty(),|ui| {
+                            if button(ui,"Confirmar limpeza",true).clicked() {
+                                let adb = self.adb(); self.cleanup_confirm = None; self.cleanup_checked = false;
+                                self.start(move || adb.clean_device_cache(&plan).map(Reply::Message));
                             }
                         });
                     });
