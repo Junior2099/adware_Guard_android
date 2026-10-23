@@ -1,0 +1,4 @@
+Opcional: para carregar nomes e ícones reais, copie para esta pasta aapt2.exe do Android SDK Build-Tools oficial.
+Alternativamente, informe o caminho completo em Conexão > Caminhos avançados.
+Não é necessário para análise, remoções ou DNS.
+https://developer.android.com/tools/aapt2

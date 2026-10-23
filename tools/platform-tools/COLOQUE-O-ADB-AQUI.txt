@@ -1,0 +1,4 @@
+Extraia nesta pasta o conteúdo do Platform-Tools oficial para Windows.
+São necessários adb.exe, AdbWinApi.dll e AdbWinUsbApi.dll (mantenha os demais arquivos do pacote).
+Download: https://developer.android.com/tools/releases/platform-tools
+ADB não é fornecido neste projeto.
